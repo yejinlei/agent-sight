@@ -80,10 +80,12 @@ func (ws *WebServer) handleIndex(w http.ResponseWriter, r *http.Request) {
 
 func (ws *WebServer) handleInfo(w http.ResponseWriter, r *http.Request) {
 	info := map[string]interface{}{
-		"count": 0,
-		"model": "",
-		"dim":   0,
-		"error": "",
+		"count":       0,
+		"model":       "",
+		"dim":         0,
+		"error":       "",
+		"topKDefault": topKDefault(),
+		"threshold":   GetAutoRerankThresholdString(),
 	}
 	vs, err := LoadVectorStore(ws.storeFile)
 	if err != nil {
@@ -149,6 +151,19 @@ func (ws *WebServer) handleBuild(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// topKDefault 从 .env 读 SEARCH_TOP_K 作为 Web 默认返回数量；空或未设置时返回 5
+func topKDefault() int {
+	val := strings.TrimSpace(os.Getenv("SEARCH_TOP_K"))
+	if val == "" || strings.EqualFold(val, "auto") {
+		return 5
+	}
+	n, err := strconv.Atoi(val)
+	if err != nil || n <= 0 || n > 50 {
+		return 5
+	}
+	return n
+}
+
 // uploadTemp 保存 multipart 上传的图片到临时文件
 func (ws *WebServer) uploadTemp(w http.ResponseWriter, r *http.Request, field string) (string, error) {
 	if err := r.ParseMultipartForm(20 << 20); err != nil {
@@ -185,20 +200,43 @@ func (ws *WebServer) handleSearch(w http.ResponseWriter, r *http.Request) {
 	}
 	defer os.Remove(qPath)
 
-	topK := 5
-	if tk := r.FormValue("topK"); tk != "" {
-		if n, err := strconv.Atoi(tk); err == nil && n > 0 {
-			topK = n
-		}
-	}
+	topK := resolveTopK(r.FormValue("topK"), 5)
 
-	results, auto := ws.runSearch(qPath, topK)
+	results, info := ws.runSearch(qPath, topK)
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(map[string]interface{}{
 		"ok":      true,
 		"results": results,
-		"auto":    auto,
+		"auto":    info,
 	})
+}
+
+// resolveTopK 解析 topK 参数：
+//   - ""/auto/非法 → fallback
+//   - "auto" → 返回 0，让 runSearch 走自适应筛选
+//   - 数字 → 直接返回（1..100）
+func resolveTopK(raw string, fallback int) int {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return fallback
+	}
+	if strings.EqualFold(raw, "auto") {
+		return 0
+	}
+	n, err := strconv.Atoi(raw)
+	if err != nil || n <= 0 {
+		return fallback
+	}
+	if n > 100 {
+		return 100
+	}
+	return n
+}
+
+// parseTopKParam 处理 CLI 风格的 topK 参数，返回 (值, 是否 auto)。
+func parseTopKParam(raw string, fallback int) (int, bool) {
+	n := resolveTopK(raw, fallback)
+	return n, n == 0
 }
 
 func (ws *WebServer) handleSearchPro(w http.ResponseWriter, r *http.Request) {
@@ -245,24 +283,32 @@ func (ws *WebServer) runSearch(queryPath string, topK int) ([]map[string]interfa
 	if err != nil {
 		return nil, map[string]interface{}{"ok": false, "reason": "查询图向量化失败: " + err.Error()}
 	}
-	results := vs.Search(vec, topK)
-	out := make([]map[string]interface{}, 0, len(results))
-	for _, r := range results {
-		out = append(out, map[string]interface{}{
-			"path":       r.Path,
-			"similarity": float64(r.Similarity),
-		})
+
+	// 取全库候选，稍后再按 topK / auto 阈值裁剪
+	all := vs.Search(vec, vs.Count())
+	if len(all) == 0 {
+		return nil, map[string]interface{}{"ok": false, "reason": "无匹配结果"}
 	}
 
 	// 阈值判定（auto 或固定）
-	top1 := float64(results[0].Similarity)
-	autoMode := strings.EqualFold(strings.TrimSpace(GetAutoRerankThresholdString()), "auto")
+	top1 := float64(all[0].Similarity)
+	thresholdStr := strings.TrimSpace(GetAutoRerankThresholdString())
+	autoMode := strings.EqualFold(thresholdStr, "auto")
 	info := map[string]interface{}{
 		"ok":         true,
 		"mode":       "auto",
 		"top1":       top1,
 		"suggestPro": false,
+		"topK":       topK,
+		"auto":       autoMode,
 	}
+
+	// 判定阈值 & 结果条数
+	keepN := topK // 默认按 topK 裁剪
+	if topK <= 0 {
+		keepN = len(all) // auto 模式先全量保留，按阈值筛
+	}
+
 	if autoMode {
 		p90, distN := computeAutoThreshold(vs)
 		info["p90"] = p90
@@ -270,13 +316,33 @@ func (ws *WebServer) runSearch(queryPath string, topK int) ([]map[string]interfa
 		if distN == 0 {
 			info["reason"] = "库太小，跳过 auto 判定"
 		} else {
-			gap := top1 - float64(results[1].Similarity)
+			gap := top1 - float64(all[1].Similarity)
 			if top1 < p90 || (gap < 0.05 && top1 < p90+0.05) {
 				info["suggestPro"] = true
 				info["reason"] = fmt.Sprintf("库内分布 p90=%.4f, Top-1=%.4f (差 %.4f) 匹配不足", p90, top1, gap)
 			} else {
 				info["reason"] = fmt.Sprintf("库内分布 p90=%.4f, Top-1=%.4f 匹配充分", p90, top1)
 			}
+		}
+		// auto 模式：按阈值自动筛选返回数量
+		if topK <= 0 {
+			cut := p90
+			keepN = 0
+			for _, r := range all {
+				if float64(r.Similarity) >= cut {
+					keepN++
+				} else {
+					break
+				}
+			}
+			// 至少返回 1 条；最多 50 条
+			if keepN < 1 {
+				keepN = 1
+			}
+			if keepN > 50 {
+				keepN = 50
+			}
+			info["autoKeep"] = keepN
 		}
 	} else {
 		thr := GetAutoRerankThreshold()
@@ -288,6 +354,38 @@ func (ws *WebServer) runSearch(queryPath string, topK int) ([]map[string]interfa
 		} else {
 			info["reason"] = fmt.Sprintf("Top-1=%.4f 达到固定阈值 %.4f", top1, thr)
 		}
+		// fixed 模式 + auto 返回数量：按阈值筛
+		if topK <= 0 {
+			keepN = 0
+			for _, r := range all {
+				if float64(r.Similarity) >= thr {
+					keepN++
+				} else {
+					break
+				}
+			}
+			if keepN < 1 {
+				keepN = 1
+			}
+			if keepN > 50 {
+				keepN = 50
+			}
+			info["autoKeep"] = keepN
+		}
+	}
+
+	if keepN > len(all) {
+		keepN = len(all)
+	}
+	results := all[:keepN]
+	info["returned"] = len(results)
+
+	out := make([]map[string]interface{}, 0, len(results))
+	for _, r := range results {
+		out = append(out, map[string]interface{}{
+			"path":       r.Path,
+			"similarity": float64(r.Similarity),
+		})
 	}
 
 	return out, info
@@ -481,9 +579,9 @@ body { font-family: -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif;
         <input type="file" id="search-file" accept="image/*" class="hidden">
         <div class="upload-preview" id="search-preview"></div>
         <div class="row" style="margin-top:16px;">
-          <div class="field" style="max-width:120px;">
+          <div class="field" style="max-width:140px;">
             <label>返回数量</label>
-            <input type="number" id="search-topk" value="8" min="1" max="50">
+            <select id="search-topk"></select>
           </div>
           <button class="btn" id="search-btn">开始检索</button>
         </div>
@@ -506,9 +604,9 @@ body { font-family: -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif;
             <label>文字筛选条件（可选）</label>
             <input type="text" id="pro-text" placeholder="如：人物是杨幂 / 有人笑 / 红色衣服">
           </div>
-          <div class="field" style="max-width:120px;">
+          <div class="field" style="max-width:140px;">
             <label>返回数量</label>
-            <input type="number" id="pro-topk" value="8" min="1" max="20">
+            <select id="pro-topk"></select>
           </div>
           <button class="btn" id="pro-btn">开始检索</button>
         </div>
@@ -747,7 +845,22 @@ async function loadStats() {
     const data = await resp.json();
     document.getElementById('stats').textContent = '图库: ' + data.count + ' 张';
     document.getElementById('model-info').textContent = (data.model || '-') + ' · ' + data.dim + '维';
+    populateTopKSelect('search-topk', data.topKDefault || 5);
+    populateTopKSelect('pro-topk', data.topKDefault || 5);
   } catch (e) {}
+}
+
+// 填充返回数量下拉：auto, 1..20，默认选中 def
+function populateTopKSelect(id, def) {
+  const sel = document.getElementById(id);
+  if (!sel) return;
+  let html = '<option value="auto">auto（自适应）</option>';
+  for (let i = 1; i <= 20; i++) {
+    html += '<option value="' + i + '">' + i + '</option>';
+  }
+  sel.innerHTML = html;
+  const d = parseInt(def, 10);
+  sel.value = (isNaN(d) || d < 1 || d > 20) ? 'auto' : String(d);
 }
 
 async function loadInfo() {
