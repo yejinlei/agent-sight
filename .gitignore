@@ -1,0 +1,31 @@
+# Binaries
+*.exe
+*.out
+agent-sight
+agent-atlas
+agent-clothing
+image-search-go
+
+# Local environment & secrets
+.env
+
+# Build artifacts
+out.jpg
+out.txt
+err.txt
+
+# Data / large files
+vectors.json
+
+# IDE
+.vscode/
+.idea/
+*.swp
+
+# Debug helpers
+fix3.py
+inspect.py
+
+# Dirs excluded from repo
+/input/
+/test/
