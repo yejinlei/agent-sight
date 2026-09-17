@@ -44,13 +44,46 @@ go build -o agent-sight .
 
 ### 2. 生成配置
 
-首次运行任意命令（推荐无参数运行）会自动生成 `.env` 模板文件到当前目录：
+首次运行**任意命令**（build / search / search-pro / web / info / 无参数），程序会自动在当前目录生成 `.env` 模板文件：
 
 ```bash
-./agent-sight          # 无参数运行 → 生成 .env 并打印用法
+./agent-sight          # 无参数运行 → 生成 .env 并打印完整用法
+./agent-sight build ./input   # 首次运行也会先生成 .env
 ```
 
 生成后编辑 `.env`，把 `OPENAI_API_KEY=sk-your-api-key-here` 替换为你的真实 Key。
+
+**生成的 `.env` 包含**（关键项）：
+
+```ini
+# ===== OpenAI-compatible API 配置 =====
+OPENAI_API_KEY=sk-your-api-key-here
+OPENAI_BASE_URL=https://api.siliconflow.cn/v1
+OPENAI_MODEL=Qwen/Qwen3-VL-Embedding-8B
+
+# ===== VLM 精排模型 =====
+VLM_MODEL=Qwen/Qwen3-VL-8B-Instruct
+AUTO_RERANK_THRESHOLD=auto        # auto = 基于库内向量分布自适应判定
+RECALL_CANDIDATES=50
+VLM_BATCH_SIZE=6
+VLM_TIMEOUT=120
+
+# ===== 向量库 & 图片预处理 =====
+VECTOR_STORE_FILE=./vectors.json
+IMAGE_OPTIMIZE=compress
+IMAGE_MAX_SIDE=1024
+IMAGE_MAX_MB=2
+```
+
+**不同平台切换**（改 `.env` 里的 `OPENAI_BASE_URL` 和 `OPENAI_MODEL`）：
+
+| 平台 | OPENAI_BASE_URL | OPENAI_MODEL |
+|---|---|---|
+| SiliconFlow（默认） | `https://api.siliconflow.cn/v1` | `Qwen/Qwen3-VL-Embedding-8B` |
+| 模力方舟 Moark | `https://api.moark.com/v1` | `Qwen/Qwen3-VL-Embedding-8B` |
+| OpenAI | `https://api.openai.com/v1` | `clip-vit-large-patch14` |
+
+> ⚠️ `.env` 已在 `.gitignore` 中排除，不会入库；模板中的 `OPENAI_API_KEY=sk-your-api-key-here` 是占位符，不会泄露真实密钥。
 
 ### 3. 建库
 

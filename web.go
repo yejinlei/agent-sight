@@ -252,12 +252,7 @@ func (ws *WebServer) handleSearchPro(w http.ResponseWriter, r *http.Request) {
 	defer os.Remove(qPath)
 
 	textQuery := strings.TrimSpace(r.FormValue("text"))
-	topK := 5
-	if tk := r.FormValue("topK"); tk != "" {
-		if n, err := strconv.Atoi(tk); err == nil && n > 0 {
-			topK = n
-		}
-	}
+	topK := resolveTopK(r.FormValue("topK"), 5)
 
 	results, reranked := ws.runSearchPro(qPath, textQuery, topK)
 	w.Header().Set("Content-Type", "application/json")
@@ -429,9 +424,17 @@ func (ws *WebServer) runSearchPro(queryPath, textQuery string, topK int) ([]map[
 		return out, false
 	}
 
+	// 只保留 IsMatch=true 的结果（VLM 明确判定为匹配）
+	matched := make([]RerankResult, 0, len(rankings))
+	for _, r := range rankings {
+		if r.IsMatch {
+			matched = append(matched, r)
+		}
+	}
+
 	out := make([]map[string]interface{}, 0, topK)
-	for i, r := range rankings {
-		if i >= topK {
+	for i, r := range matched {
+		if topK > 0 && i >= topK {
 			break
 		}
 		out = append(out, map[string]interface{}{
@@ -713,7 +716,7 @@ function renderResults(container, results, mode) {
     return;
   }
   el.innerHTML = results.map((r, i) => {
-    const score = mode === 'search' ? (r.similarity * 100).toFixed(2) + '%' : (r.score || '-');
+    const score = mode === 'search' ? (r.similarity * 100).toFixed(2) + '%' : (r.score != null ? Number(r.score).toFixed(1) : '-');
     const scoreLabel = mode === 'search' ? '相似度' : 'VLM评分';
     return '<div class="result-card">' +
       '<img src="/img?path=' + encodeURIComponent(r.path) + '" loading="lazy">' +
