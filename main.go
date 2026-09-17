@@ -606,7 +606,6 @@ func searchPro(queryPath string, storeFile string, textQuery string, topK int) {
 		os.Exit(1)
 	}
 
-	reranker := NewReranker()
 	recallN := GetRecallCandidates()
 	if recallN > vs.Count() {
 		recallN = vs.Count()
@@ -616,27 +615,37 @@ func searchPro(queryPath string, storeFile string, textQuery string, topK int) {
 		batchSize = recallN
 	}
 
+	useVLM := textQuery != ""
 	fmt.Printf("🎯 精准检索: %s\n", queryPath)
 	if textQuery != "" {
 		fmt.Printf("   筛选条件: %s\n", textQuery)
+	} else {
+		fmt.Printf("   筛选条件: (无，跳过 VLM，仅嵌入相似度排序)\n")
 	}
 	fmt.Printf("   图库大小: %d 张\n", vs.Count())
-	if recallN >= vs.Count() {
-		fmt.Printf("   流程: 嵌入召回全部 %d 张 → VLM精排Top-auto（送 %d 张打分）\n", vs.Count(), batchSize)
-	} else {
-		fmt.Printf("   流程: 嵌入召回Top-%d → VLM精排Top-auto（送 %d 张打分）\n", recallN, batchSize)
-	}
-
-	thresholdStr := GetAutoRerankThresholdString()
-	if strings.EqualFold(thresholdStr, "auto") {
-		p90, distN := computeAutoThreshold(vs)
-		if distN == 0 {
-			fmt.Printf("   阈值: auto（库太小，跳过 p90 判定）\n")
+	if useVLM {
+		if recallN >= vs.Count() {
+			fmt.Printf("   流程: 嵌入召回全部 %d 张 → VLM精排Top-auto（送 %d 张打分）\n", vs.Count(), batchSize)
 		} else {
-			fmt.Printf("   阈值: auto（库内分布 p90=%.4f，样本 %d 对）\n", p90, distN)
+			fmt.Printf("   流程: 嵌入召回Top-%d → VLM精排Top-auto（送 %d 张打分）\n", recallN, batchSize)
+		}
+		thresholdStr := GetAutoRerankThresholdString()
+		if strings.EqualFold(thresholdStr, "auto") {
+			p90, distN := computeAutoThreshold(vs)
+			if distN == 0 {
+				fmt.Printf("   阈值: auto（库太小，跳过 p90 判定）\n")
+			} else {
+				fmt.Printf("   阈值: auto（库内分布 p90=%.4f，样本 %d 对）\n", p90, distN)
+			}
+		} else {
+			fmt.Printf("   阈值: %s\n", thresholdStr)
 		}
 	} else {
-		fmt.Printf("   阈值: %s\n", thresholdStr)
+		if recallN >= vs.Count() {
+			fmt.Printf("   流程: 嵌入召回全部 %d 张 → 按相似度排序输出 Top-%s\n", vs.Count(), topKToString(topK))
+		} else {
+			fmt.Printf("   流程: 嵌入召回 Top-%d → 按相似度排序输出 Top-%s\n", recallN, topKToString(topK))
+		}
 	}
 	fmt.Println()
 
@@ -650,21 +659,49 @@ func searchPro(queryPath string, storeFile string, textQuery string, topK int) {
 	candidates := vs.Search(vec, recallN)
 	if len(candidates) > 0 {
 		top1 := float64(candidates[0].Similarity)
-		sent := len(candidates)
-		if batchSize > 0 && batchSize < sent {
-			sent = batchSize
-		}
-		if recallN >= vs.Count() {
-			fmt.Printf("   已召回全部 %d 张（Top-1 相似度=%.4f），送 VLM 精排前 %d 张\n", len(candidates), top1, sent)
+		if useVLM {
+			sent := len(candidates)
+			if batchSize > 0 && batchSize < sent {
+				sent = batchSize
+			}
+			if recallN >= vs.Count() {
+				fmt.Printf("   已召回全部 %d 张（Top-1 相似度=%.4f），送 VLM 精排前 %d 张\n", len(candidates), top1, sent)
+			} else {
+				fmt.Printf("   已召回 %d/%d 张（Top-1 相似度=%.4f），送 VLM 精排前 %d 张\n", len(candidates), recallN, top1, sent)
+			}
 		} else {
-			fmt.Printf("   已召回 %d/%d 张（Top-1 相似度=%.4f），送 VLM 精排前 %d 张\n", len(candidates), recallN, top1, sent)
+			if recallN >= vs.Count() {
+				fmt.Printf("   已召回全部 %d 张（Top-1 相似度=%.4f）\n", len(candidates), top1)
+			} else {
+				fmt.Printf("   已召回 %d/%d 张（Top-1 相似度=%.4f）\n", len(candidates), recallN)
+			}
 		}
 	} else {
 		fmt.Printf("   已召回 0 张候选图\n")
 	}
 	fmt.Println()
 
+	// 无文字筛选时跳过 VLM，直接按相似度排序输出
+	if !useVLM {
+		topKLabel := topKToString(topK)
+		fmt.Printf("🏆 嵌入相似度 Top-%s 结果（无文字筛选，未调用 VLM）：\n\n", topKLabel)
+		limit := topK
+		if limit <= 0 {
+			limit = len(candidates)
+		}
+		for i, r := range candidates {
+			if i >= limit {
+				break
+			}
+			bar := strings.Repeat("█", int(float64(r.Similarity)*30)) + strings.Repeat("░", 30-int(float64(r.Similarity)*30))
+			fmt.Printf("  %d. [%.4f] %s\n", i+1, float64(r.Similarity), bar)
+			fmt.Printf("      📄 %s\n\n", r.Path)
+		}
+		return
+	}
+
 	// 第二步：VLM精排
+	reranker := NewReranker()
 	fmt.Println("② VLM大模型精排中（请稍候2-5秒）...")
 	rerankResults, err := reranker.Rerank(queryPath, candidates, textQuery)
 	if err != nil {

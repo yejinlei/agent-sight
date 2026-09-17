@@ -254,6 +254,19 @@ func (ws *WebServer) handleSearchPro(w http.ResponseWriter, r *http.Request) {
 	textQuery := strings.TrimSpace(r.FormValue("text"))
 	topK := resolveTopK(r.FormValue("topK"), 5)
 
+	// 无文字筛选时跳过 VLM，走纯嵌入路径，与 search 行为一致
+	if textQuery == "" {
+		results, auto := ws.runSearch(qPath, topK)
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{
+			"ok":       true,
+			"results":  results,
+			"reranked": false,
+			"auto":     auto,
+		})
+		return
+	}
+
 	results, reranked := ws.runSearchPro(qPath, textQuery, topK)
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(map[string]interface{}{
@@ -617,6 +630,7 @@ body { font-family: -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif;
         </div>
         <div class="error hidden" id="pro-error"></div>
         <div class="loading hidden" id="pro-loading">VLM 精排中（约 5-30 秒）...</div>
+        <div class="auto-banner hidden" id="pro-auto"></div>
         <div class="results" id="pro-results"></div>
       </div>
     </div>
@@ -798,7 +812,12 @@ document.getElementById('pro-btn').addEventListener('click', async () => {
   if (!file) { showError('pro-error', '请先上传图片'); return; }
   hideError('pro-error');
   document.getElementById('pro-results').innerHTML = '';
+  const proAuto = document.getElementById('pro-auto');
+  proAuto.classList.add('hidden');
+  proAuto.innerHTML = '';
+  const hasText = document.getElementById('pro-text').value.trim() !== '';
   setLoading('pro-loading', true);
+  document.getElementById('pro-loading').textContent = hasText ? 'VLM 精排中（约 5-30 秒）...' : '检索中...';
   document.getElementById('pro-btn').disabled = true;
   try {
     const fd = new FormData();
@@ -808,7 +827,13 @@ document.getElementById('pro-btn').addEventListener('click', async () => {
     const resp = await fetch('/api/search-pro', { method: 'POST', body: fd });
     const data = await resp.json();
     if (!resp.ok) throw new Error(data.error || resp.statusText);
-    renderResults('pro-results', data.results, 'pro');
+    // 无文字筛选走嵌入路径，用 search 模式渲染（相似度百分比）+ auto banner
+    if (!data.reranked) {
+      renderResults('pro-results', data.results, 'search');
+      if (data.auto) renderAutoBanner('pro-auto', data.auto);
+    } else {
+      renderResults('pro-results', data.results, 'pro');
+    }
   } catch (e) {
     showError('pro-error', e.message);
   } finally {
