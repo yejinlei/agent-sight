@@ -8,6 +8,9 @@ image-search-go
 
 # Local environment & secrets
 .env
+.env.example
+.env.*
+*.env
 
 # Build artifacts
 out.jpg

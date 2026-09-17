@@ -13,6 +13,8 @@ import (
 )
 
 func main() {
+	// 若 .env 不存在则自动生成模板，再加载
+	ensureEnvFileSilent()
 	if err := godotenv.Load(); err != nil {
 		fmt.Println("⚠️  未找到 .env 文件，将尝试使用环境变量")
 	}
@@ -23,8 +25,7 @@ func main() {
 	}
 
 	if len(os.Args) < 2 {
-		// 无参数执行：确保 .env 存在（不存在则用占位模板生成，避免真实 key 泄露）
-		ensureEnvFile()
+		printUsage()
 		return
 	}
 
@@ -68,12 +69,20 @@ func main() {
 			return
 		}
 		textQuery := ""
-		topK := 5
+		topK := 0 // auto：默认不截断，全部展示
 		if len(os.Args) >= 4 {
-			if _, err := fmt.Sscanf(os.Args[3], "%d", &topK); err != nil {
-				textQuery = os.Args[3]
+			s := strings.TrimSpace(os.Args[3])
+			if strings.EqualFold(s, "auto") {
+				topK = 0 // auto：不截断，全部展示
+			} else if _, err := fmt.Sscanf(s, "%d", &topK); err != nil {
+				textQuery = s
 				if len(os.Args) >= 5 {
-					fmt.Sscanf(os.Args[4], "%d", &topK)
+					s2 := strings.TrimSpace(os.Args[4])
+					if strings.EqualFold(s2, "auto") {
+						topK = 0
+					} else {
+						fmt.Sscanf(s2, "%d", &topK)
+					}
 				}
 			}
 		}
@@ -155,19 +164,27 @@ func getFlagFloatOrDefault(opts map[string]string, key string, def float64) floa
 	return def
 }
 
-// ensureEnvFile 无参数执行时确保当前目录下存在 .env 文件。
-// 若已存在则不动；若不存在则写入占位模板（API_KEY 使用占位符，防止真实密钥泄露）。
-func ensureEnvFile() {
+// ensureEnvFileSilent 静默版：若 .env 不存在则写入占位模板（不打印已存在提示）。
+// 首次运行时会自动生成，方便用户直接跑任意命令。
+func ensureEnvFileSilent() {
 	if _, err := os.Stat(".env"); err == nil {
-		fmt.Println("✅ .env 已存在，无需生成。")
-		fmt.Println("   文件: ./.env")
 		return
 	} else if !os.IsNotExist(err) {
 		fmt.Println("⚠️  无法检测 .env 文件:", err)
 		return
 	}
+	template := envTemplate()
+	if err := os.WriteFile(".env", []byte(template), 0o644); err != nil {
+		fmt.Println("❌ 写入 .env 失败:", err)
+		return
+	}
+	fmt.Println("✅ 已生成 .env 模板文件（API Key 为占位符，请替换为你的真实 Key）")
+	fmt.Println("   文件: ./.env")
+}
 
-	template := `# ===== OpenAI-compatible API 配置 =====
+// envTemplate 返回 .env 占位模板字符串，避免真实 API Key 泄露。
+func envTemplate() string {
+	return `# ===== OpenAI-compatible API 配置 =====
 # 兼容 SiliconFlow / Moark / OpenAI 等所有 OpenAI-compatible /embeddings 端点
 # ⚠️  请填写你的真实 API Key 后再运行 build / search 等命令
 OPENAI_API_KEY=sk-your-api-key-here
@@ -204,13 +221,6 @@ IMAGE_MAX_SIDE=1024
 # 压缩后目标字节上限（MB），仅 compress 模式生效
 IMAGE_MAX_MB=2
 `
-
-	if err := os.WriteFile(".env", []byte(template), 0o644); err != nil {
-		fmt.Println("❌ 写入 .env 失败:", err)
-		return
-	}
-	fmt.Println("✅ 已生成 .env 模板文件（API Key 为占位符，请替换为你的真实 Key）")
-	fmt.Println("   文件: ./.env")
 }
 
 func printUsage() {
@@ -427,7 +437,7 @@ func infoLibrary(storeFile string) {
 	fmt.Println("   嵌入模型:", vs.ModelName)
 	fmt.Println("   向量维度:", vs.Dim)
 	fmt.Println("   VLM精排模型:", os.Getenv("VLM_MODEL"))
-	fmt.Println("   自动精排阈值:", GetAutoRerankThreshold())
+	fmt.Println("   自动精排阈值:", GetAutoRerankThresholdString())
 	fmt.Println("   粗召回数量:", GetRecallCandidates())
 	fmt.Println("   图片总数:", vs.Count())
 }
@@ -611,7 +621,25 @@ func searchPro(queryPath string, storeFile string, textQuery string, topK int) {
 		fmt.Printf("   筛选条件: %s\n", textQuery)
 	}
 	fmt.Printf("   图库大小: %d 张\n", vs.Count())
-	fmt.Printf("   流程: 嵌入召回Top-%d → VLM精排Top-%d\n\n", recallN, batchSize)
+	if recallN >= vs.Count() {
+		fmt.Printf("   流程: 嵌入召回全部 %d 张 → VLM精排Top-auto（送 %d 张打分）\n", vs.Count(), batchSize)
+	} else {
+		fmt.Printf("   流程: 嵌入召回Top-%d → VLM精排Top-auto（送 %d 张打分）\n", recallN, batchSize)
+	}
+
+	thresholdStr := GetAutoRerankThresholdString()
+	if strings.EqualFold(thresholdStr, "auto") {
+		p90, distN := computeAutoThreshold(vs)
+		if distN == 0 {
+			fmt.Printf("   阈值: auto（库太小，跳过 p90 判定）\n")
+		} else {
+			fmt.Printf("   阈值: auto（库内分布 p90=%.4f，样本 %d 对）\n", p90, distN)
+		}
+	} else {
+		fmt.Printf("   阈值: %s\n", thresholdStr)
+	}
+	fmt.Println()
+
 	// 第一步：嵌入粗召回
 	fmt.Println("① 嵌入粗召回中...")
 	vec, err := provider.EmbedImage(queryPath)
@@ -620,7 +648,21 @@ func searchPro(queryPath string, storeFile string, textQuery string, topK int) {
 		os.Exit(1)
 	}
 	candidates := vs.Search(vec, recallN)
-	fmt.Printf("   已召回 %d 张候选图，准备发送给VLM精排...\n\n", len(candidates))
+	if len(candidates) > 0 {
+		top1 := float64(candidates[0].Similarity)
+		sent := len(candidates)
+		if batchSize > 0 && batchSize < sent {
+			sent = batchSize
+		}
+		if recallN >= vs.Count() {
+			fmt.Printf("   已召回全部 %d 张（Top-1 相似度=%.4f），送 VLM 精排前 %d 张\n", len(candidates), top1, sent)
+		} else {
+			fmt.Printf("   已召回 %d/%d 张（Top-1 相似度=%.4f），送 VLM 精排前 %d 张\n", len(candidates), recallN, top1, sent)
+		}
+	} else {
+		fmt.Printf("   已召回 0 张候选图\n")
+	}
+	fmt.Println()
 
 	// 第二步：VLM精排
 	fmt.Println("② VLM大模型精排中（请稍候2-5秒）...")
@@ -628,8 +670,12 @@ func searchPro(queryPath string, storeFile string, textQuery string, topK int) {
 	if err != nil {
 		fmt.Println("❌ VLM精排失败:", err)
 		fmt.Println("💡 降级返回嵌入检索结果:")
-		for i, r := range candidates[:topK] {
-			if i >= len(candidates) {
+		downLimit := topK
+		if downLimit <= 0 {
+			downLimit = len(candidates)
+		}
+		for i, r := range candidates {
+			if i >= downLimit {
 				break
 			}
 			fmt.Printf("  %d. [%.4f] %s\n", i+1, r.Similarity, r.Path)
@@ -639,9 +685,10 @@ func searchPro(queryPath string, storeFile string, textQuery string, topK int) {
 	fmt.Println("   ✓ 精排完成\n\n")
 
 	// 输出最终结果
-	fmt.Printf("🏆 VLM精排 Top-%d 结果（0-10分制）：\n\n", topK)
+	topKLabel := topKToString(topK)
+	fmt.Printf("🏆 VLM精排 Top-%s 结果（0-10分制）：\n\n", topKLabel)
 	for i, r := range rerankResults {
-		if i >= topK {
+		if topK > 0 && i >= topK {
 			break
 		}
 		scoreBar := strings.Repeat("█", int(r.Score/10*30)) + strings.Repeat("░", 30-int(r.Score/10*30))
@@ -653,4 +700,12 @@ func searchPro(queryPath string, storeFile string, textQuery string, topK int) {
 		fmt.Printf("      📄 %s\n", r.Path)
 		fmt.Printf("      💬 %s\n\n", r.Reason)
 	}
+}
+
+// topKToString 把 topK 数值转成显示标签：0 → auto，其它 → 数字
+func topKToString(topK int) string {
+	if topK <= 0 {
+		return "auto"
+	}
+	return strconv.Itoa(topK)
 }

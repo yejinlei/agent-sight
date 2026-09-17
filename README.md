@@ -33,18 +33,24 @@
 
 ## 快速开始
 
-### 1. 配置
+### 1. 编译或下载二进制
 
 ```bash
-cp .env.example .env
-# 编辑 .env 填入 OPENAI_API_KEY
-```
-
-### 2. 编译
-
-```bash
+# 源码编译
 go build -o agent-sight .
+
+# 或直接下载 GitHub Releases 里对应平台的二进制
 ```
+
+### 2. 生成配置
+
+首次运行任意命令（推荐无参数运行）会自动生成 `.env` 模板文件到当前目录：
+
+```bash
+./agent-sight          # 无参数运行 → 生成 .env 并打印用法
+```
+
+生成后编辑 `.env`，把 `OPENAI_API_KEY=sk-your-api-key-here` 替换为你的真实 Key。
 
 ### 3. 建库
 
@@ -57,12 +63,13 @@ go build -o agent-sight .
 
 ```bash
 # 快速检索（嵌入）
-./agent-sight search ./q.jpg 5
+./agent-sight search ./q.jpg auto
 ./agent-sight search -t auto ./q.jpg    # 自适应阈值
 
 # 精准检索（嵌入 + VLM 精排）
-./agent-sight search-pro ./q.jpg 5
+./agent-sight search-pro ./q.jpg
 ./agent-sight search-pro ./q.jpg "有猫" 3
+./agent-sight search-pro ./q.jpg "有猫" auto   # 不截断
 ```
 
 ### 5. Web UI
@@ -72,7 +79,7 @@ go build -o agent-sight .
 ./agent-sight web -p 9000  # 自定义端口
 ```
 
-自动打开浏览器，左侧栏 4 个 Tab：快速检索 / 精准检索 / 建库 / 图库信息。
+自动打开浏览器，左侧栏 4 个 Tab：快速检索 / 精准检索 / 建库 / 图库信息。返回数量支持 `auto / 1-20` 下拉选择。
 
 ## 命令
 
@@ -100,7 +107,7 @@ go build -o agent-sight .
 
 ## 多平台发布
 
-使用 GitHub Releases，二进制命名：`agent-sight_<os>_<arch>.zip`
+使用 GitHub Releases，原生二进制（非 zip）命名：`agent-sight_<os>_<arch>`
 
 ## 项目结构
 
@@ -112,9 +119,10 @@ go build -o agent-sight .
 ├── reranker.go       # VLM 精排
 ├── vectorstore.go    # JSON 向量库
 ├── go.mod
-├── .env.example
 └── README.md
 ```
+
+首次运行会自动在当前目录生成 `.env`（已在 `.gitignore` 中排除，不会入库）。
 
 ## License
 

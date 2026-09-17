@@ -435,8 +435,10 @@ func (ws *WebServer) runSearchPro(queryPath, textQuery string, topK int) ([]map[
 			break
 		}
 		out = append(out, map[string]interface{}{
-			"path":  r.Path,
-			"score": r.Score,
+			"path":     r.Path,
+			"score":    r.Score,
+			"reason":   r.Reason,
+			"is_match": r.IsMatch,
 		})
 	}
 	return out, true
